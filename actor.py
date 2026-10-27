@@ -345,10 +345,10 @@ if __name__ == "__main__":
         width=100,
         height=100,
         obstacles=[
-            #Obstacle(10,30,10,3),
-            #Obstacle(8,45,5,5),
-            #Obstacle(70,50,20,5),
-            #Obstacle(75,80,11,7)
+            Obstacle(10,30,10,3),
+            Obstacle(8,45,5,5),
+            Obstacle(70,50,20,5),
+            Obstacle(75,80,11,7)
         ],
         stay_prob=1.0,
         start=(0, 0),
@@ -361,9 +361,9 @@ if __name__ == "__main__":
         width=10,
         height=10,
         obstacles=[
-            #Obstacle(3,4,7,1),
+            Obstacle(3,4,7,1),
             #Obstacle(6,7,7,2),
-            #Obstacle(5,5,1,3)
+            Obstacle(5,5,1,3)
         ],
         stay_prob=1.0,
         start=(0, 0),
@@ -373,7 +373,7 @@ if __name__ == "__main__":
     )
 
     #dynamic_grid = Grid()
-    actor = MCTSPlanner(grid=static_grid,c=0.1,open_loop=False,max_iters=5000,rollout_horizon=100,profile=False)
+    actor = MCTSPlanner(grid=small_static_grid,c=0.1,open_loop=False,max_iters=1000,rollout_horizon=50,profile=False)
     #actor = ReplanAStar(grid=static_grid)
 
     actor.init_plot()

@@ -80,6 +80,8 @@ class StateNode:
 
     visits: int = 0
     total_reward: float = 0.0
+    num_collide: int = 0
+    num_finish: int = 0
 
 @dataclass
 class ChanceNode:
@@ -91,6 +93,8 @@ class ChanceNode:
 
     visits: int = 0
     total_reward: float = 0.0
+    num_collide: int = 0
+    num_finish: int = 0
 
 def get_state(grid):
     # Count all obstacle positions 
@@ -137,6 +141,26 @@ def choose_rollout_action(env, goal, epsilon=0.2):
 
     return env.DIRECTION_LABELS[(dx, dy)]
 
+def choose_rollout_action_safe(env):
+    x, y = env.actor_pos
+    safe_actions = []
+
+    for action, (dx, dy) in enumerate(DIRECTIONS):
+        new_pos = (x + int(dx), y + int(dy))
+
+        if not env.in_bounds(new_pos):
+            continue
+
+        if env.is_occupied(new_pos):
+            continue
+
+        safe_actions.append(action)
+
+    if safe_actions:
+        return random.choice(safe_actions)
+
+    return None
+
 def traverse(root, env, c=1.0, max_depth=100):
     current = root
     path = [current]
@@ -144,6 +168,7 @@ def traverse(root, env, c=1.0, max_depth=100):
     depth = 0
 
     while depth < max_depth:
+        #print(f"depth: {depth}")
         # Check for terminal states here (goal, collision, horizon, etc.)
 
         # Find actions that haven't been expanded
@@ -155,6 +180,7 @@ def traverse(root, env, c=1.0, max_depth=100):
         ]
 
         if untried:
+            #print(f"trying something in untried")
             # EXPANSION: try a new action
             action = random.choice(untried)
 
@@ -166,6 +192,7 @@ def traverse(root, env, c=1.0, max_depth=100):
             path.append(chance_node)
 
         else:
+            #print(f"selection")
             # SELECTION: choose an existing action using UCT
             # chance_node = max(
             #     current.children.values(),
@@ -197,6 +224,7 @@ def traverse(root, env, c=1.0, max_depth=100):
         next_state = get_state(env)
 
         if next_state not in chance_node.children:
+            #print(f"adding state node")
             next_node = StateNode(
                 state=next_state,
                 parent=chance_node,
@@ -204,13 +232,14 @@ def traverse(root, env, c=1.0, max_depth=100):
             chance_node.children[next_state] = next_node
             expanded = True
         else:
+            #print(f"go to state node")
             next_node = chance_node.children[next_state]
             expanded = False
 
         path.append(next_node)
 
         if res["reached_goal"] or res["collision"] or res.get("no_path"):
-            return next_node, path, cost, res
+            return next_node, path, cost, depth, res
 
         if expanded:
             return next_node, path, cost, depth, None
@@ -230,21 +259,28 @@ def rollout(current_env, goal, current_path_cost, node_start, rollout_horizon):
         # next_pos = all_neighbors(rollout_state)[np.random.choice(np.arange(len(all_neighbors(rollout_state))))]
         # action = DIRECTION_LABELS[(next_pos[0]-rollout_state[0],next_pos[1]-rollout_state[1])]
 
-        action = choose_rollout_action(current_env, goal, epsilon=0.2)
+        # action = choose_rollout_action(current_env,current_env.goal,epsilon=1.0)
+        action = choose_rollout_action_safe(current_env)
+        collide = False
+        finish = False
         
         res = current_env.step(actor_action=action)
         current_path_cost += ACTION_COSTS[action]
         rollout_state = current_env.actor_pos
         if res["reached_goal"]:
-            reward = 0.5 + 0.5 / (1 + current_path_cost)
+            #reward = 0.5 + 0.5 / (1 + current_path_cost)
+            reward = 1 - 0.001 * current_path_cost
+            finish = True
             break
 
         if res["collision"]:
-            reward = 0.0
+            #reward = -0.5 - 0.001 * current_path_cost
+            reward = -1 - 0.001 * current_path_cost
+            collide = True
             break
 
         if res.get("no_path"):
-            reward = 0
+            reward = -0.001 * current_path_cost
             break
 
     if reward is None:
@@ -259,39 +295,47 @@ def rollout(current_env, goal, current_path_cost, node_start, rollout_horizon):
         reward -= 0.001 * current_path_cost
         # reward = initial_distance - final_distance
     
-    return reward
+    return reward, collide, finish
 
 def mcts_closed_loop(start, goal, env, c=1.0, max_iters=1000, rollout_horizon=50):
     root = StateNode(state=get_state(env))
 
     for i in range(max_iters):
+        # if i % 1 == 0:
+        #     print(f"iter {i} ({100*i/max_iters:.1f} done)")
         # Each iteration starts with a fresh copy of the environment
         current_env = env.clone()
         node_start = current_env.actor_pos
 
         # Selection + expansion step, starting from root node
         leaf, path, accum_cost, depth, step_result = traverse(root, current_env, c)
-
+        #print("finished traverse")
+        collide = False
+        finish = False
         if step_result is not None:
             if step_result["collision"]:
-                reward = 0.0
+                reward =  -1 - 0.001 * accum_cost
+                collide = True
             elif step_result["reached_goal"]:
-                reward = 0.5 + 0.5 / (1 + accum_cost)
+                reward = 1 - 0.001 * accum_cost
+                finish = True
             else:
                 reward = 0.0
         else:
-            reward = rollout(
+            reward, collide, finish = rollout(
                 current_env,
                 goal,
                 accum_cost,
                 node_start=node_start,
                 rollout_horizon=max(0,rollout_horizon-depth),
             )
-
+        #print("finished rollout stage")
         # 3. Backpropagation
         for node in reversed(path):
             node.visits += 1
             node.total_reward += reward
+            node.num_collide += int(collide)
+            node.num_finish += int(finish)
 
     # Choose the most visited action from the root
     best_action = max(
@@ -299,10 +343,15 @@ def mcts_closed_loop(start, goal, env, c=1.0, max_iters=1000, rollout_horizon=50
         key=lambda n: n.visits
     ).action
 
+    # best_action = max(
+    #     root.children.values(),
+    #     key=lambda n: n.total_reward / n.visits
+    # ).action
+
     for action, child in sorted(root.children.items()):
         print(
             f"Action {action} ({DIRECTIONS[action]}): "
-            f"visits={child.visits}, "
+            f"visits={child.visits}, Collisions={child.num_collide}, Successes={child.num_finish}, "
             f"mean_reward={child.total_reward / max(child.visits, 1):.5f}"
         )
 
@@ -359,7 +408,7 @@ def mcts_open_loop(start, goal, env, c=1.0, max_iters=1000, rollout_horizon=50):
                 reward = 1
             else:
                 # Rollout
-                reward = rollout(current_env=current_env,goal=current_env.goal,current_path_cost=current_path_cost,node_start=node_start,rollout_horizon=rollout_horizon)
+                reward, collide, finish = rollout(current_env=current_env,goal=current_env.goal,current_path_cost=current_path_cost,node_start=node_start,rollout_horizon=rollout_horizon)
             
             # backprop the reward up the tree
             n = child
