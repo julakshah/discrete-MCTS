@@ -13,6 +13,23 @@ class Obstacle:
     y: int
     width: int
     height: int
+    # N, NE, E, SE, S, SW, W, NW. Movement + stay probabilities must add to 1.
+    # Leaving both as None uses the grid's probabilities.
+    movement_probs: tuple | None = None
+    stay_prob: float | None = None
+
+
+def validate_probabilities(movement_probs, stay_prob):
+    movement_probs = np.asarray(movement_probs, dtype=float)
+    if movement_probs.shape != (8,):
+        raise ValueError("movement_probs must contain 8 values")
+    if not np.all(np.isfinite(movement_probs)) or not np.isfinite(stay_prob):
+        raise ValueError("Probabilities must be finite numbers")
+    if np.any(movement_probs < 0) or not 0 <= stay_prob <= 1:
+        raise ValueError("Probabilities must be between 0 and 1")
+    if not np.isclose(movement_probs.sum() + stay_prob, 1.0):
+        raise ValueError("Movement probabilities must sum to 1")
+    return movement_probs.copy(), float(stay_prob)
 
 def overlaps_at(x, y, width, height, other):
     return (
@@ -69,7 +86,6 @@ class Grid:
         self.actor_pos = self.start
 
         self.obstacles = copy.deepcopy(obstacles or [])
-        self.initial_obstacles = copy.deepcopy(self.obstacles)
 
         self.track_density = track_density
 
@@ -77,22 +93,9 @@ class Grid:
         if movement_probs is None:
             movement_probs = np.full(8, (1.0 - stay_prob) / 8)
 
-        self.movement_probs = np.asarray(
-            movement_probs, dtype=float
+        self.movement_probs, self.stay_prob = validate_probabilities(
+            movement_probs, stay_prob
         )
-
-        if self.movement_probs.shape != (8,):
-            raise ValueError("movement_probs must contain 8 values")
-
-        if np.any(self.movement_probs < 0) or not 0 <= stay_prob <= 1:
-            raise ValueError("Invalid movement probabilities")
-
-        if not np.isclose(
-            self.movement_probs.sum() + stay_prob, 1.0
-        ):
-            raise ValueError("Movement probabilities must sum to 1")
-
-        self.stay_prob = stay_prob
 
         self.movement_choice = np.append(
             self.movement_probs, stay_prob
@@ -109,6 +112,7 @@ class Grid:
             raise ValueError("Goal is outside grid")
 
         for i, obs in enumerate(self.obstacles):
+            self.set_obstacle_probs(obs)
             if obs.width <= 0 or obs.height <= 0:
                 raise ValueError("Invalid obstacle dimensions")
 
@@ -122,13 +126,37 @@ class Grid:
                 if self.obstacles_overlap(obs, other):
                     raise ValueError("Initial obstacles overlap")
 
+        self.initial_obstacles = copy.deepcopy(self.obstacles)
+
         # Optional density map for A*
         self.density = None
         self.diffusion_kernel = None
+        self.density_maps = {}
+        self.density_kernels = {}
 
         if self.track_density:
-            self.density = self.obstacle_matrix().astype(float)
             self.diffusion_kernel = self._make_diffusion_kernel()
+            self.reset_density()
+
+    def set_obstacle_probs(self, obs):
+        movement_probs = obs.movement_probs
+        stay_prob = obs.stay_prob
+
+        if movement_probs is None and stay_prob is None:
+            movement_probs = self.movement_probs
+            stay_prob = self.stay_prob
+        elif movement_probs is None:
+            # If only stay is given, make the other directions equally likely.
+            movement_probs = np.full(8, (1.0 - stay_prob) / 8)
+        elif stay_prob is None:
+            stay_prob = 1.0 - np.sum(movement_probs)
+            if abs(stay_prob) < 1e-12:  # Account for rounding near zero.
+                stay_prob = 0.0
+
+        movement_probs, stay_prob = validate_probabilities(movement_probs, stay_prob)
+        # Tuples let us group obstacles with the same probabilities later.
+        obs.movement_probs = tuple(movement_probs)
+        obs.stay_prob = stay_prob
 
     def in_bounds(self, pos):
         x, y = pos
@@ -166,6 +194,28 @@ class Grid:
             for obs in self.obstacles
         )
 
+    def can_move(self, pos, new_pos):
+        if not self.in_bounds(new_pos) or self.is_occupied(new_pos):
+            return False
+
+        x, y = pos
+        new_x, new_y = new_pos
+        if new_x != x and new_y != y:
+            # Don't let a diagonal move squeeze past an occupied corner.
+            if self.is_occupied((new_x, y)) or self.is_occupied((x, new_y)):
+                return False
+        return True
+
+    def step_result(self, collision=False):
+        if self.track_density:
+            self.reset_density()
+        collision = collision or self.is_occupied(self.actor_pos)
+        return {
+            "collision": collision,
+            "reached_goal": not collision and self.actor_pos == self.goal,
+            "actor_pos": self.actor_pos,
+        }
+
     def step(self, actor_action=None):
         if actor_action is not None:
             if (
@@ -174,12 +224,19 @@ class Grid:
             ):
                 raise ValueError("Invalid actor action")
 
+        # A collision can't be undone by moving away in the same turn.
+        if self.is_occupied(self.actor_pos):
+            return self.step_result(collision=True)
+
+        if actor_action is not None:
             dx, dy = self.DIRECTIONS[actor_action]
             x, y = self.actor_pos
 
             new_pos = (x + dx, y + dy)
 
             if self.in_bounds(new_pos):
+                if not self.can_move(self.actor_pos, new_pos):
+                    return self.step_result(collision=True)
                 self.actor_pos = new_pos
 
         # Move obstacles in random order
@@ -188,15 +245,13 @@ class Grid:
         if n:
             obstacle_order = self.rng.permutation(n)
 
-            actions = np.searchsorted(
-                self.cumulative_probs,
-                self.rng.random(n),
-                side="right"
-            )
-
-            for idx, action in zip(obstacle_order, actions):
+            for idx in obstacle_order:
                 obs = self.obstacles[idx]
 
+                # Pick a direction using this obstacle's probabilities.
+                probabilities = np.append(obs.movement_probs, obs.stay_prob)
+                probabilities = probabilities / probabilities.sum()
+                action = self.rng.choice(9, p=probabilities)
                 dx, dy = self.DIRECTIONS[action]
 
                 new_x = obs.x + dx
@@ -211,18 +266,38 @@ class Grid:
                 ):
                     continue
 
-                # Check other obstacles
-                if any(
-                    overlaps_at(
-                        new_x, new_y, obs.width, obs.height, other
-                    )
-                    for j, other in enumerate(self.obstacles)
-                    if j != idx
-                ):
+                # Check the destination and both sides of a diagonal move.
+                positions = [(new_x, new_y)]
+                if dx != 0 and dy != 0:
+                    positions.append((new_x, obs.y))
+                    positions.append((obs.x, new_y))
+
+                blocked = False
+                for check_x, check_y in positions:
+                    for j, other in enumerate(self.obstacles):
+                        if j == idx:
+                            continue
+                        if overlaps_at(check_x, check_y, obs.width, obs.height, other):
+                            blocked = True
+                            break
+                    if blocked:
+                        break
+                if blocked:
                     continue
+
+                collision = False
+                actor_x, actor_y = self.actor_pos
+                for check_x, check_y in positions:
+                    if (check_x <= actor_x < check_x + obs.width
+                            and check_y <= actor_y < check_y + obs.height):
+                        collision = True
+                        break
 
                 obs.x = new_x
                 obs.y = new_y
+
+                if collision:
+                    return self.step_result(collision=True)
 
             # Remove obstacles sufficiently far OOB
             self.obstacles = [
@@ -230,11 +305,7 @@ class Grid:
                 if not self.obstacle_too_far_oob(obs)
             ]
 
-        return {
-            "collision": self.is_occupied(self.actor_pos),
-            "reached_goal": self.actor_pos == self.goal,
-            "actor_pos": self.actor_pos,
-        }
+        return self.step_result()
 
     def neighbors(self, pos):
         x, y = pos
@@ -242,10 +313,7 @@ class Grid:
         return [
             (x + dx, y + dy)
             for dx, dy in self.DIRECTIONS[:8]
-            if (
-                self.in_bounds((x + dx, y + dy))
-                and not self.is_occupied((x + dx, y + dy))
-            )
+            if self.can_move(pos, (x + dx, y + dy))
         ]
 
     def reset(self):
@@ -253,7 +321,7 @@ class Grid:
         self.obstacles = copy.deepcopy(self.initial_obstacles)
 
         if self.track_density:
-            self.density = self.obstacle_matrix().astype(float)
+            self.reset_density()
 
     def clone(self):
         """
@@ -277,10 +345,16 @@ class Grid:
         # Only copy density if enabled
         if self.track_density:
             new.density = self.density.copy()
+            new.density_maps = {}
+            new.density_kernels = {}
+            for key in self.density_maps:
+                new.density_maps[key] = self.density_maps[key].copy()
+                new.density_kernels[key] = self.density_kernels[key].copy()
 
         return new
 
-    def add_obstacle(self, min_y, max_y, width=1, height=1):
+    def add_obstacle(self, min_y, max_y, width=1, height=1,
+                     movement_probs=None, stay_prob=None):
         y = int(self.rng.integers(min_y, max_y + 1))
 
         obstacle = Obstacle(
@@ -288,7 +362,10 @@ class Grid:
             y=y,
             width=width,
             height=height,
+            movement_probs=movement_probs,
+            stay_prob=stay_prob,
         )
+        self.set_obstacle_probs(obstacle)
 
         if self.obstacle_contains(obstacle, self.start):
             return False
@@ -305,31 +382,60 @@ class Grid:
         self.obstacles.append(obstacle)
 
         if self.track_density:
-            self._add_obstacle_to_density(obstacle)
+            self.reset_density()
 
         return True
 
-    def _make_diffusion_kernel(self):
+    def _make_diffusion_kernel(self, movement_probs=None, stay_prob=None):
+        if movement_probs is None:
+            movement_probs = self.movement_probs
+        if stay_prob is None:
+            stay_prob = self.stay_prob
         kernel = np.zeros((3, 3), dtype=float)
 
         for prob, (dx, dy) in zip(
-            self.movement_probs,
+            movement_probs,
             self.DIRECTIONS[:8],
         ):
             kernel[1 + dy, 1 + dx] = prob
 
-        kernel[1, 1] = self.stay_prob
+        kernel[1, 1] = stay_prob
 
         return kernel
 
-    def _add_obstacle_to_density(self, obs):
+    def _add_obstacle_to_density(self, obs, density):
         x0 = max(0, obs.x)
         y0 = max(0, obs.y)
         x1 = min(self.width, obs.x + obs.width)
         y1 = min(self.height, obs.y + obs.height)
 
         if x0 < x1 and y0 < y1:
-            self.density[y0:y1, x0:x1] = 1.0
+            density[y0:y1, x0:x1] = 1.0
+
+    def reset_density(self):
+        """Start the density prediction from the obstacles' current positions."""
+        if not self.track_density:
+            raise RuntimeError("Density tracking is disabled")
+        self.density_maps = {}
+        self.density_kernels = {}
+        # Obstacles with the same movement probabilities can share a map.
+        for obs in self.obstacles:
+            key = (obs.movement_probs, obs.stay_prob)
+            if key not in self.density_maps:
+                self.density_maps[key] = np.zeros((self.height, self.width))
+                self.density_kernels[key] = self._make_diffusion_kernel(
+                    obs.movement_probs, obs.stay_prob
+                )
+            self._add_obstacle_to_density(obs, self.density_maps[key])
+        self.update_density()
+
+    def update_density(self):
+        self.density = np.zeros((self.height, self.width), dtype=float)
+        for density_map in self.density_maps.values():
+            self.density += density_map
+        # Predicted obstacles can overlap, so cap the combined density at 1.
+        # This prediction doesn't account for blocked obstacle movements.
+        self.density = np.clip(self.density, 0.0, 1.0)
 
     def diffuse_step(self):
         if not self.track_density:
@@ -337,13 +443,12 @@ class Grid:
                 "Density tracking is disabled"
             )
 
-        self.density = convolve2d(
-            self.density,
-            self.diffusion_kernel,
-            mode="same",
-            boundary="fill",
-            fillvalue=0,
-        )
+        for key in self.density_maps:
+            self.density_maps[key] = convolve2d(
+                self.density_maps[key], self.density_kernels[key], mode="same",
+                boundary="fill", fillvalue=0,
+            )
+        self.update_density()
 
         return self.density
 
@@ -386,4 +491,3 @@ if __name__ == "__main__":
         ax.imshow(grid.obstacle_matrix())
         grid.step()
         plt.pause(0.3)
-        
