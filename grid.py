@@ -6,6 +6,159 @@ from matplotlib.colors import LogNorm
 import time
 import copy
 from dataclasses import dataclass
+import random
+from math import prod
+
+def generate_grid(
+    width=100,
+    height=100,
+    obstacle_count=None,
+    density=None,
+    obstacle_size=(3, 10),
+    static_fraction=0.0,
+    stay_prob=0.2,
+    right_bias=0.7,
+    start=(0, 0),
+    goal=None,
+    clearance=2,
+    vertical_buffer=0.1,
+    seed=42,
+):
+    """
+    Generate a grid containing rectangular obstacles.
+
+    Specify either obstacle_count or density, but not both.
+
+    density: Approximate fraction of grid area initially occupied.
+    obstacle_size: (minimum, maximum) side length.
+    static_fraction: Fraction of obstacles that are stationary.
+    stay_prob: Probability a dynamic obstacle stays in place.
+    right_bias: Fraction of movement probability assigned to
+                E, NE, SE (the remainder goes to other directions).
+    clearance: Minimum separation around obstacles and start/goal.
+    """
+    rng = random.Random(seed)
+    goal = goal if goal is not None else (width - 1, height - 1)
+
+    if (obstacle_count is None) == (density is None):
+        raise ValueError("Specify exactly one of obstacle_count or density")
+    if not (0 <= static_fraction <= 1):
+        raise ValueError("static_fraction must be in [0, 1]")
+    if not (0 <= stay_prob <= 1 and 0 <= right_bias <= 1):
+        raise ValueError("stay_prob and right_bias must be in [0, 1]")
+
+    min_size, max_size = obstacle_size
+    if min_size < 1 or max_size < min_size:
+        raise ValueError("Invalid obstacle_size")
+
+    if density is not None and not (0 <= density <= 1):
+        raise ValueError("density must be in [0, 1]")
+
+    # N, NE, E, SE, S, SW, W, NW
+    right_weights = [0, 0.25, 0.5, 0.25, 0, 0, 0, 0]
+    other_weights = [0.2, 0, 0, 0, 0.2, 0.2, 0.2, 0.2]
+
+    movement_probs = tuple(
+        (1 - stay_prob) * (
+            right_bias * r + (1 - right_bias) * o
+        )
+        for r, o in zip(right_weights, other_weights)
+    )
+
+    obstacles = []
+    occupied_area = 0
+    target_area = (
+        density * width * height if density is not None else None
+    )
+
+    def overlaps(x, y, w, h, ox, oy, ow, oh, margin):
+        return (
+            x < ox + ow + margin
+            and x + w + margin > ox
+            and y < oy + oh + margin
+            and y + h + margin > oy
+        )
+
+    def valid_position(x, y, w, h):
+        # Keep start and goal clear
+        for px, py in (start, goal):
+            if overlaps(x, y, w, h, px, py, 1, 1, clearance):
+                return False
+
+        for obs in obstacles:
+            if overlaps(
+                x, y, w, h,
+                obs.x, obs.y, obs.width, obs.height,
+                clearance
+            ):
+                return False
+
+        return True
+
+    max_attempts = 10000
+    attempts = 0
+
+    while attempts < max_attempts:
+        if obstacle_count is not None:
+            if len(obstacles) >= obstacle_count:
+                break
+        elif occupied_area >= target_area:
+            break
+
+        attempts += 1
+
+        w = rng.randint(min_size, min(max_size, width))
+        h = rng.randint(min_size, min(max_size, height))
+
+        # Reserve clear channels at the top and bottom
+        buffer_cells = int(height * vertical_buffer)
+
+        min_y = buffer_cells
+        max_y = height - buffer_cells - h
+
+        if max_y < min_y:
+            continue  # Obstacle cannot fit in the available vertical space
+
+        x = rng.randint(0, width - w)
+        y = rng.randint(min_y, max_y)
+
+        if not valid_position(x, y, w, h):
+            continue
+
+        is_static = rng.random() < static_fraction
+
+        obstacles.append(
+            Obstacle(
+                x=x,
+                y=y,
+                width=w,
+                height=h,
+                movement_probs=(
+                    (0.0,) * 8 if is_static else movement_probs
+                ),
+                stay_prob=1.0 if is_static else stay_prob,
+            )
+        )
+
+        occupied_area += w * h
+
+    if attempts >= max_attempts:
+        print(
+            f"Warning: placed {len(obstacles)} obstacles; "
+            f"achieved density {occupied_area / (width * height):.3f}"
+        )
+
+    return Grid(
+        width=width,
+        height=height,
+        obstacles=obstacles,
+        stay_prob=stay_prob,
+        movement_probs=movement_probs,
+        start=start,
+        goal=goal,
+        seed=seed,
+    )
+
 
 @dataclass
 class Obstacle:
@@ -158,26 +311,30 @@ class Grid:
         obs.movement_probs = tuple(movement_probs)
         obs.stay_prob = stay_prob
 
+        obs.cumulative_probs = np.cumsum(
+            (*obs.movement_probs, obs.stay_prob)
+        )
+
     def in_bounds(self, pos):
         x, y = pos
         return 0 <= x < self.width and 0 <= y < self.height
 
-    @staticmethod
-    def obstacle_contains(obs, pos):
+    def obstacle_contains(self, obs, pos):
         x, y = pos
 
         return (
-            obs.x <= x < obs.x + obs.width
-            and obs.y <= y < obs.y + obs.height
+            (x - obs.x) % self.width < obs.width
+            and (y - obs.y) % self.height < obs.height
         )
 
-    @staticmethod
-    def obstacles_overlap(a, b):
+    def obstacles_overlap(self, a, b):
+        def overlap_1d(a0, alen, b0, blen, period):
+            d = (b0 - a0) % period
+            return d < alen or period - d < blen
+
         return (
-            a.x < b.x + b.width
-            and a.x + a.width > b.x
-            and a.y < b.y + b.height
-            and a.y + a.height > b.y
+            overlap_1d(a.x, a.width, b.x, b.width, self.width)
+            and overlap_1d(a.y, a.height, b.y, b.height, self.height)
         )
 
     def obstacle_too_far_oob(self, obs, buffer=2):
@@ -249,13 +406,15 @@ class Grid:
                 obs = self.obstacles[idx]
 
                 # Pick a direction using this obstacle's probabilities.
-                probabilities = np.append(obs.movement_probs, obs.stay_prob)
-                probabilities = probabilities / probabilities.sum()
-                action = self.rng.choice(9, p=probabilities)
+                action = np.searchsorted(
+                    obs.cumulative_probs,
+                    self.rng.random(),
+                    side="right",
+                )
                 dx, dy = self.DIRECTIONS[action]
 
-                new_x = obs.x + dx
-                new_y = obs.y + dy
+                new_x = (obs.x + dx) % self.width
+                new_y = (obs.y + dy) % self.height
 
                 # Check goal overlap
                 gx, gy = self.goal
@@ -277,7 +436,14 @@ class Grid:
                     for j, other in enumerate(self.obstacles):
                         if j == idx:
                             continue
-                        if overlaps_at(check_x, check_y, obs.width, obs.height, other):
+                        candidate = Obstacle(
+                            check_x % self.width,
+                            check_y % self.height,
+                            obs.width,
+                            obs.height,
+                        )
+
+                        if self.obstacles_overlap(candidate, other):
                             blocked = True
                             break
                     if blocked:
