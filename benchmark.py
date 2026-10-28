@@ -87,6 +87,7 @@ def benchmark(
     scenario_factory takes a seed and returns a new grid. Each run counts
     planner.step() calls, including calls that end without moving. Averages
     include all runs; progress only includes runs with a static reference path.
+    Nodes per step are normalized by each run's nonzero reference distance.
     Normalized distance and planning time average the per-run ratios for
     successful runs with a nonzero reference distance.
     """
@@ -158,6 +159,7 @@ def benchmark(
     distances = []
     planning_times = []
     nodes_per_step = []
+    normalized_nodes_per_step = []
     progresses = []
     reference_distances = []
     normalized_distances = []
@@ -181,6 +183,11 @@ def benchmark(
         planning_times.append(run["planning_time"])
         nodes_per_step.append(run["nodes_visited_per_step"])
 
+        if run["reference_path_distance"] is not None and run["reference_path_distance"] > 0:
+            normalized_nodes_per_step.append(
+                run["nodes_visited_per_step"] / run["reference_path_distance"]
+            )
+
         if run["progress_percent"] is not None:
             progresses.append(run["progress_percent"])
         if run["reference_path_distance"] is not None:
@@ -193,6 +200,9 @@ def benchmark(
         "average_distance": mean(distances),
         "average_planning_time": mean(planning_times),
         "average_nodes_visited_per_step": mean(nodes_per_step),
+        "average_nodes_per_step_per_reference_distance": (
+            mean(normalized_nodes_per_step) if normalized_nodes_per_step else None
+        ),
         "average_progress_percent": mean(progresses) if progresses else None,
         "average_reference_path_distance": (
             mean(reference_distances) if reference_distances else None
@@ -247,10 +257,15 @@ def benchmark(
             "(no reference paths)"
         )
 
-    print(
-        f"mean(nodes visited / planner steps) = "
-        f"{summary['average_nodes_visited_per_step']:.2f}"
-    )
+    if normalized_nodes_per_step:
+        print(
+            f"mean(nodes visited / planner steps / reference path distance) = "
+            f"{summary['average_nodes_per_step_per_reference_distance']:.2f} "
+            f"({len(normalized_nodes_per_step)}/{len(runs)} runs)"
+        )
+    else:
+        print("mean(nodes visited / planner steps / reference path distance) = unavailable "
+              "(no nonzero reference paths)")
     print(
         f"Average planning time (all runs): {summary['average_planning_time']:.4f} seconds"
     )
