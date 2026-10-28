@@ -630,7 +630,7 @@ class Grid:
         if self.track_density:
             self.reset_density()
 
-    def clone(self):
+    def clone(self, include_density=True):
         """
         Copy the mutable simulation state without
         recursively copying the entire Grid.
@@ -646,13 +646,19 @@ class Grid:
         new.rng.bit_generator.state = copy.deepcopy(self.rng.bit_generator.state)
 
         # Only copy density if enabled
-        if self.track_density:
+        if self.track_density and include_density:
             new.density = self.density.copy()
             new.density_maps = {}
             new.density_kernels = {}
             for key in self.density_maps:
                 new.density_maps[key] = self.density_maps[key].copy()
                 new.density_kernels[key] = self.density_kernels[key].copy()
+        elif self.track_density:
+            new.track_density = False
+            new.density = None
+            new.diffusion_kernel = None
+            new.density_maps = {}
+            new.density_kernels = {}
 
         return new
 
