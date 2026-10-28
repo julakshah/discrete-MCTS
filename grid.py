@@ -542,11 +542,6 @@ class Grid:
                     self.rng.random(),
                     side="right",
                 )
-                action = np.searchsorted(
-                    obs.cumulative_probs,
-                    self.rng.random(),
-                    side="right",
-                )
                 dx, dy = self.DIRECTIONS[action]
 
                 new_x = (obs.x + dx) % self.width
