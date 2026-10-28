@@ -1,7 +1,8 @@
 from bfs import bfs
 from astar import astar
 from mcts import mcts_open_loop, mcts_closed_loop
-from grid import Grid, Obstacle
+from grid import Grid, Obstacle, generate_grid
+import old_grid
 import cProfile
 import pstats
 import numpy as np
@@ -341,7 +342,23 @@ class MCTSPlanner:
         plt.show()
 
 if __name__ == "__main__":
-    static_grid = Grid(
+    static_grid = old_grid.Grid(
+        width=100,
+        height=100,
+        obstacles=[
+            Obstacle(10,30,10,3),
+            Obstacle(8,45,5,5),
+            Obstacle(70,50,20,5),
+            Obstacle(75,80,11,7)
+        ],
+        stay_prob=1.0,
+        start=(0, 0),
+        goal=(99,99),
+        movement_probs=[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0],
+        seed=42,
+    )
+
+    static_grid = old_grid.Grid(
         width=100,
         height=100,
         obstacles=[
@@ -372,8 +389,56 @@ if __name__ == "__main__":
         seed=42
     )
 
+    BENCHMARKS = {
+        "small_static": dict(
+            width=20, height=20,
+            density=0.10,
+            obstacle_size=(2, 4),
+            static_fraction=1.0,
+        ),
+        "small_dynamic": dict(
+            width=20, height=20,
+            density=0.10,
+            obstacle_size=(2, 4),
+            static_fraction=0.0,
+        ),
+        "large_static": dict(
+            width=100, height=100,
+            density=0.04,
+            obstacle_size=(4, 10),
+            static_fraction=1.0,
+        ),
+        "large_dynamic": dict(
+            width=100, height=100,
+            density=0.10,
+            obstacle_size=(4, 10),
+            static_fraction=0.0,
+        ),
+        "dense_dynamic": dict(
+            width=50, height=50,
+            density=0.25,
+            obstacle_size=(2, 5),
+            static_fraction=0.0,
+        ),
+        "mixed_motion": dict(
+            width=50, height=50,
+            density=0.15,
+            obstacle_size=(2, 6),
+            static_fraction=0.5,
+        ),
+    }
+
+    grid = generate_grid(
+        **BENCHMARKS["small_static"],
+        stay_prob=0.2,
+        right_bias=0.8,
+        seed=42,
+        vertical_buffer=0.1
+    )
+
     #dynamic_grid = Grid()
-    actor = MCTSPlanner(grid=small_static_grid,c=0.1,open_loop=False,max_iters=1000,rollout_horizon=50,profile=False)
+    #actor = MCTSPlanner(grid=small_static_grid,c=0.1,open_loop=False,max_iters=1000,rollout_horizon=10,profile=False)
+    actor = MCTSPlanner(grid=grid,c=0.1,open_loop=False,max_iters=1000,rollout_horizon=20,profile=False)
     #actor = ReplanAStar(grid=static_grid)
 
     actor.init_plot()

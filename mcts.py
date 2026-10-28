@@ -252,6 +252,12 @@ def traverse(root, env, c=1.0, max_depth=100):
 def rollout(current_env, goal, current_path_cost, node_start, rollout_horizon):
     # Rollout step from current env state
     reward = None
+    if rollout_horizon < 1:
+        # We have no more horizon to rollout
+        # Reward is just the penalty of the cost length 
+        reward = -0.001 * current_path_cost
+        return reward, False, False
+
     max_iters = rollout_horizon
     rollout_state = current_env.actor_pos
     for i in range(max_iters):
@@ -264,7 +270,9 @@ def rollout(current_env, goal, current_path_cost, node_start, rollout_horizon):
         collide = False
         finish = False
         
+        #print(f"started stepping env")
         res = current_env.step(actor_action=action)
+        #print(f"finished stepping env")
         current_path_cost += ACTION_COSTS[action]
         rollout_state = current_env.actor_pos
         if res["reached_goal"]:
@@ -313,6 +321,7 @@ def mcts_closed_loop(start, goal, env, c=1.0, max_iters=1000, rollout_horizon=50
         collide = False
         finish = False
         if step_result is not None:
+            #print("step result is not none")
             if step_result["collision"]:
                 reward =  -1 - 0.001 * accum_cost
                 collide = True
@@ -322,6 +331,7 @@ def mcts_closed_loop(start, goal, env, c=1.0, max_iters=1000, rollout_horizon=50
             else:
                 reward = 0.0
         else:
+            #print(f"starting rollout with depth {max(0,rollout_horizon-depth)}")
             reward, collide, finish = rollout(
                 current_env,
                 goal,
