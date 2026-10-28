@@ -446,12 +446,9 @@ class Grid:
         return 0 <= x < self.width and 0 <= y < self.height
 
     def obstacle_contains(self, obs, pos):
-    def obstacle_contains(self, obs, pos):
-        x, y = pos
-
-        return (x - obs.x) % self.width < obs.width and (
-            y - obs.y
-        ) % self.height < obs.height
+        return self.rectangle_contains(
+            obs.x, obs.y, obs.width, obs.height, pos
+        )
 
     def obstacles_overlap(self, a, b):
         def overlap_1d(a0, alen, b0, blen, period):
@@ -461,6 +458,18 @@ class Grid:
         return overlap_1d(a.x, a.width, b.x, b.width, self.width) and overlap_1d(
             a.y, a.height, b.y, b.height, self.height
         )
+    
+    def rectangles_overlap(
+        self, ax, ay, aw, ah,
+        bx, by, bw, bh,
+    ):
+        dx = (bx - ax) % self.width
+        dy = (by - ay) % self.height
+
+        overlap_x = dx < aw or self.width - dx < bw
+        overlap_y = dy < ah or self.height - dy < bh
+
+        return overlap_x and overlap_y
 
     def obstacle_too_far_oob(self, obs, buffer=2):
         return (
@@ -548,7 +557,9 @@ class Grid:
                 # Check goal overlap
                 gx, gy = self.goal
 
-                if new_x <= gx < new_x + obs.width and new_y <= gy < new_y + obs.height:
+                if self.rectangle_contains(
+                    new_x, new_y, obs.width, obs.height, self.goal
+                ):
                     continue
 
                 # Check the destination and both sides of a diagonal move.
@@ -562,35 +573,33 @@ class Grid:
                     for j, other in enumerate(self.obstacles):
                         if j == idx:
                             continue
-                        candidate = Obstacle(
-                            check_x % self.width,
-                            check_y % self.height,
-                            obs.width,
-                            obs.height,
-                        )
+                        # candidate = Obstacle(
+                        #     check_x % self.width,
+                        #     check_y % self.height,
+                        #     obs.width,
+                        #     obs.height,
+                        # )
 
-                        if self.obstacles_overlap(candidate, other):
-                        candidate = Obstacle(
-                            check_x % self.width,
-                            check_y % self.height,
-                            obs.width,
-                            obs.height,
-                        )
-
-                        if self.obstacles_overlap(candidate, other):
+                        # if self.obstacles_overlap(candidate, other):
+                        #     blocked = True
+                        #     break
+                        if self.rectangles_overlap(
+                            check_x, check_y, obs.width, obs.height,
+                            other.x, other.y, other.width, other.height,
+                        ):
                             blocked = True
                             break
                     if blocked:
                         break
                 if blocked:
                     continue
-
+                
                 collision = False
-                actor_x, actor_y = self.actor_pos
                 for check_x, check_y in positions:
-                    if (
-                        check_x <= actor_x < check_x + obs.width
-                        and check_y <= actor_y < check_y + obs.height
+                    if self.rectangle_contains(
+                        check_x, check_y,
+                        obs.width, obs.height,
+                        self.actor_pos,
                     ):
                         collision = True
                         break
@@ -600,11 +609,6 @@ class Grid:
 
                 if collision:
                     return self.step_result(collision=True)
-
-            # Remove obstacles sufficiently far OOB
-            self.obstacles = [
-                obs for obs in self.obstacles if not self.obstacle_too_far_oob(obs)
-            ]
 
         return self.step_result()
 
@@ -616,6 +620,13 @@ class Grid:
             for dx, dy in self.DIRECTIONS[:8]
             if self.can_move(pos, (x + dx, y + dy))
         ]
+    
+    def rectangle_contains(self, x, y, width, height, pos):
+        px, py = pos
+        return (
+            (px - x) % self.width < width
+            and (py - y) % self.height < height
+        )
 
     def reset(self):
         self.actor_pos = self.start
@@ -741,13 +752,13 @@ class Grid:
                 self.density_maps[key],
                 self.density_kernels[key],
                 mode="same",
-                boundary="fill",
-                fillvalue=0,
+                boundary="wrap",
             )
         self.update_density()
 
         return self.density
 
+    
     def obstacle_matrix(self):
         matrix = np.zeros(
             (self.height, self.width),
@@ -755,15 +766,13 @@ class Grid:
         )
 
         for obs in self.obstacles:
-            x0 = max(0, obs.x)
-            y0 = max(0, obs.y)
-            x1 = min(self.width, obs.x + obs.width)
-            y1 = min(self.height, obs.y + obs.height)
+            xs = np.arange(obs.x, obs.x + obs.width) % self.width
+            ys = np.arange(obs.y, obs.y + obs.height) % self.height
 
-            if x0 < x1 and y0 < y1:
-                matrix[y0:y1, x0:x1] = 1
+            matrix[np.ix_(ys, xs)] = 1
 
         return matrix
+
 
 
 if __name__ == "__main__":

@@ -49,7 +49,15 @@ class Planner(ABC):
         self.ax.plot(*self.grid.goal, "r*", markersize=12, label="Goal")
         (self.path_line,) = self.ax.plot([], [], "b-", linewidth=2, label="Path")
         (self.actor_marker,) = self.ax.plot([], [], "bo", markersize=8, label="Actor")
-        self.obstacle_patches = []
+        self.obstacle_image = self.ax.imshow(
+            self.grid.obstacle_matrix(),
+            cmap="Greys",
+            vmin=0,
+            vmax=1,
+            origin="upper",
+            interpolation="nearest",
+            zorder=0,
+        )
 
         self.ax.legend()
         self.fig.show()
@@ -65,21 +73,17 @@ class Planner(ABC):
         x, y = self.grid.actor_pos
         self.actor_marker.set_data([x], [y])
 
-        for patch in self.obstacle_patches:
-            patch.remove()
-        self.obstacle_patches.clear()
-
-        for obstacle in self.grid.obstacles:
-            rectangle = Rectangle(
-                (obstacle.x - 0.5, obstacle.y - 0.5),
-                obstacle.width,
-                obstacle.height,
-                facecolor="black",
-                alpha=0.6,
-                edgecolor="black",
-            )
-            self.ax.add_patch(rectangle)
-            self.obstacle_patches.append(rectangle)
+        # for obstacle in self.grid.obstacles:
+        #     rectangle = Rectangle(
+        #         (obstacle.x - 0.5, obstacle.y - 0.5),
+        #         obstacle.width,
+        #         obstacle.height,
+        #         facecolor="black",
+        #         alpha=0.6,
+        #         edgecolor="black",
+        #     )
+        #     self.ax.add_patch(rectangle)
+        self.obstacle_image.set_data(self.grid.obstacle_matrix())
 
         self.ax.set_title(
             f"{self.plot_label} Navigation | Step {len(self.history) - 1} "
