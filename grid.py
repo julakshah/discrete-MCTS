@@ -446,6 +446,7 @@ class Grid:
         return 0 <= x < self.width and 0 <= y < self.height
 
     def obstacle_contains(self, obs, pos):
+    def obstacle_contains(self, obs, pos):
         x, y = pos
 
         return (x - obs.x) % self.width < obs.width and (
@@ -532,8 +533,15 @@ class Grid:
                     self.rng.random(),
                     side="right",
                 )
+                action = np.searchsorted(
+                    obs.cumulative_probs,
+                    self.rng.random(),
+                    side="right",
+                )
                 dx, dy = self.DIRECTIONS[action]
 
+                new_x = (obs.x + dx) % self.width
+                new_y = (obs.y + dy) % self.height
                 new_x = (obs.x + dx) % self.width
                 new_y = (obs.y + dy) % self.height
 
@@ -554,6 +562,14 @@ class Grid:
                     for j, other in enumerate(self.obstacles):
                         if j == idx:
                             continue
+                        candidate = Obstacle(
+                            check_x % self.width,
+                            check_y % self.height,
+                            obs.width,
+                            obs.height,
+                        )
+
+                        if self.obstacles_overlap(candidate, other):
                         candidate = Obstacle(
                             check_x % self.width,
                             check_y % self.height,
