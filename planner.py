@@ -72,8 +72,11 @@ class Planner(ABC):
         for obstacle in self.grid.obstacles:
             rectangle = Rectangle(
                 (obstacle.x - 0.5, obstacle.y - 0.5),
-                obstacle.width, obstacle.height,
-                facecolor="black", alpha=0.6, edgecolor="black",
+                obstacle.width,
+                obstacle.height,
+                facecolor="black",
+                alpha=0.6,
+                edgecolor="black",
             )
             self.ax.add_patch(rectangle)
             self.obstacle_patches.append(rectangle)
@@ -109,7 +112,7 @@ class Planner(ABC):
         for frame_index, (obstacle_map, actor_pos) in enumerate(self.frames):
             image.set_data(obstacle_map)
             actor_marker.set_offsets([actor_pos])
-            path = np.asarray(self.history[:frame_index + 1])
+            path = np.asarray(self.history[: frame_index + 1])
             path_line.set_data(path[:, 0], path[:, 1])
             ax.set_title(f"{title} - step {frame_index}")
             plt.pause(0.15)
@@ -168,8 +171,11 @@ class AStar(Planner):
 
             if self.dynamic:
                 self.path, nodes = dynamic_astar(
-                    self.grid, self.grid.actor_pos, self.grid.goal,
-                    self.heuristic, self.density_constant,
+                    self.grid,
+                    self.grid.actor_pos,
+                    self.grid.goal,
+                    self.heuristic,
+                    self.density_constant,
                 )
             else:
                 self.path, nodes = astar(
@@ -223,3 +229,48 @@ class AStar(Planner):
             self.next_step += 1
             self.steps_since_plan += 1
         return result
+
+
+if __name__ == "__main__":
+    from grid import (
+        static_sparse_grid,
+        dynamic_sparse_grid,
+        dynamic_dense_grid,
+        dynamic_wall_maze_grid,
+    )
+
+    # Choose: static_sparse, dynamic_sparse, dynamic_dense, dynamic_wall_maze
+    scenario = "dynamic_wall_maze"
+    width = 100
+    height = 100
+    seed = 0
+    start_clearance = 5
+    max_steps = 500
+
+    scenarios = {
+        "static_sparse": static_sparse_grid,
+        "dynamic_sparse": dynamic_sparse_grid,
+        "dynamic_dense": dynamic_dense_grid,
+        "dynamic_wall_maze": dynamic_wall_maze_grid,
+    }
+
+    grid = scenarios[scenario](
+        width=width, height=height, seed=seed, start_clearance=start_clearance
+    )
+    planner = AStar(grid, dynamic=True, replan_every=5, density_constant=50.0)
+
+    planner.init_plot()
+    try:
+        for step in range(max_steps):
+            result = planner.step()
+
+            if result["reached_goal"]:
+                print("Robot reached the goal!")
+                break
+            if result["collision"]:
+                print("Robot collided with an obstacle.")
+                break
+        else:
+            print("Stopped at the step limit.")
+    finally:
+        planner.close_plot()
