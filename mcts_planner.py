@@ -20,6 +20,9 @@ class MCTSPlanner(Planner):
         c=0.1,
         profile=False,
         verbose=True,
+        policy="safe_random",
+        heuristic="legacy_progress",
+        eps=0.2
     ):
         super().__init__(grid)
 
@@ -32,6 +35,9 @@ class MCTSPlanner(Planner):
         self.c = c
         self.profile = profile
         self.verbose = verbose
+        self.policy = policy
+        self.heuristic = heuristic
+        self.eps = eps
 
         self.result = None
 
@@ -58,12 +64,12 @@ class MCTSPlanner(Planner):
                     c=self.c,
                     max_iters=self.max_iters,
                     rollout_horizon=self.rollout_horizon,
-                    rollout_policy="safe_random",
+                    rollout_policy=self.policy,
                     #rollout_policy="epsilon_greedy",
-                    epsilon=0.2,
+                    epsilon=self.eps,
                     #reward_heuristic="absorbing_failure",
                     #reward_heuristic="progress",
-                    reward_heuristic="legacy_progress",
+                    reward_heuristic=self.heuristic,
                     collision_penalty=20.0,
                     failure_cost_per_step=20.0,
                     verbose=True,
@@ -76,12 +82,12 @@ class MCTSPlanner(Planner):
                 c=self.c,
                 max_iters=self.max_iters,
                 rollout_horizon=self.rollout_horizon,
-                rollout_policy="safe_random",
+                rollout_policy=self.policy,
                 #rollout_policy="epsilon_greedy",
-                epsilon=0.2,
+                epsilon=self.eps,
                 #reward_heuristic="absorbing_failure",
                 #reward_heuristic="progress",
-                reward_heuristic="legacy_progress",
+                reward_heuristic=self.heuristic,
                 collision_penalty=20.0,
                 failure_cost_per_step=20.0,
                 verbose=True,
@@ -181,6 +187,9 @@ if __name__ == "__main__":
         c=0.2,
         profile=False,
         verbose=False,
+        policy="safe_random",
+        heuristic="legacy_progress",
+        eps=0.2
     )
 
     planner.init_plot()
