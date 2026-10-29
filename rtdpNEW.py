@@ -47,28 +47,32 @@ def heuristic(start, end):
     return max(dx, dy) + (math.sqrt(2) - 1) * min(dx, dy)
 
 
-class RTDP(Planner):
+class LRTDP(Planner):
     """
-    Sampled-transition RTDP for the existing Grid environment.
+    Sampled-transition, labeled RTDP for the existing Grid environment.
 
     This implementation:
     - Uses the full robot and obstacle configuration as the state.
     - Initializes state values with an octile-distance heuristic.
-    - Runs RTDP trials using sampled environment transitions.
+    - Runs labeled RTDP trials using sampled environment transitions.
     - Uses Bellman backups to update state values.
+    - Labels states solved when sampled Bellman residuals are small and all
+      sampled greedy successors are solved.
     - Rejects actions that collide in any sampled outcome.
     - Uses the existing Planner interface for execution and metrics.
 
     Actions are filtered against all possible one-tick obstacle moves.
-    Longer-horizon values and trials still use sampled transitions.
+    Longer-horizon values, labels, and trials still use sampled transitions,
+    so solved labels are practical approximations rather than exact proofs.
     """
 
     def __init__(
         self,
         grid,
-        max_trials=100,
+        max_trials=30,
         max_trial_steps=20,
-        transition_samples=10,
+        transition_samples=3,
+        epsilon=0.1,
         verbose=True,
     ):
         super().__init__(grid)
@@ -79,11 +83,14 @@ class RTDP(Planner):
             raise ValueError("max_trial_steps must be positive")
         if transition_samples < 1:
             raise ValueError("transition_samples must be positive")
+        if epsilon <= 0:
+            raise ValueError("epsilon must be positive")
 
-        self.plot_label = "RTDP"
+        self.plot_label = "LRTDP"
         self.max_trials = max_trials
         self.max_trial_steps = max_trial_steps
         self.transition_samples = transition_samples
+        self.epsilon = epsilon
         self.verbose = verbose
 
         # Keep planning randomness reproducible without advancing the live grid.
@@ -94,6 +101,8 @@ class RTDP(Planner):
 
         # V(s) is estimated cost from a complete state to the goal.
         self.value_function = {}
+        # Approximate LRTDP labels.  Labels are scoped to this planner/grid.
+        self.solved = set()
 
         self.result = None
 
@@ -203,6 +212,22 @@ class RTDP(Planner):
             return WAIT_COST
         return COSTS[DIRECTIONS[action]]
 
+    def q_from_outcomes(self, action, outcomes):
+        """Estimate Q from an already sampled set of successor outcomes."""
+        total_cost = 0.0
+        immediate_cost = self.action_cost(action)
+
+        for next_env, result in outcomes:
+            if result["collision"]:
+                return float("inf")
+
+            if result["reached_goal"]:
+                total_cost += immediate_cost
+            else:
+                total_cost += immediate_cost + self.initialize_value(next_env)
+
+        return total_cost / len(outcomes)
+
     def sample_transition(self, env, action):
         """
         Simulate one action on a clone, leaving the original environment
@@ -225,55 +250,125 @@ class RTDP(Planner):
         decision. This is a conservative sample-based rule, not a
         mathematical guarantee of safety.
         """
-        total_cost = 0.0
+        outcomes = [
+            self.sample_transition(env, action)
+            for _ in range(self.transition_samples)
+        ]
+        return self.q_from_outcomes(action, outcomes)
 
-        for _ in range(self.transition_samples):
-            next_env, result = self.sample_transition(env, action)
+    def best_action_evaluation(self, env, transition_cache=None):
+        """Return the best action, its Q-value, and sampled outcomes.
 
-            # Reject actions with sampled collisions.
-            if result["collision"]:
-                return float("inf")
-
-            immediate_cost = self.action_cost(action)
-
-            if result["reached_goal"]:
-                total_cost += immediate_cost
-            else:
-                next_value = self.initialize_value(next_env)
-                total_cost += immediate_cost + next_value
-
-        return total_cost / self.transition_samples
-
-    def greedy_action(self, env):
-        """Pick the action that minimizes the estimated expected Q-value."""
+        A transition cache is used during CHECK_SOLVED.  It reuses the same
+        sampled successors while values are updated, avoiding repeated grid
+        clones without pretending that the samples are exact probabilities.
+        """
+        state = self.get_state(env)
         best_action = None
         best_q = float("inf")
+        best_outcomes = []
 
         for action in self.legal_actions(env):
-            q = self.q_value(env, action)
+            cache_key = (state, action)
+            if transition_cache is not None and cache_key in transition_cache:
+                outcomes = transition_cache[cache_key]
+            else:
+                outcomes = [
+                    self.sample_transition(env, action)
+                    for _ in range(self.transition_samples)
+                ]
+                if transition_cache is not None:
+                    transition_cache[cache_key] = outcomes
 
+            q = self.q_from_outcomes(action, outcomes)
             if q < best_q:
                 best_q = q
                 best_action = action
+                best_outcomes = outcomes
 
+        return best_action, best_q, best_outcomes
+
+    def greedy_action(self, env):
+        """Pick the action that minimizes the estimated expected Q-value."""
+        best_action, best_q, _ = self.best_action_evaluation(env)
         return best_action, best_q
 
-    def bellman_backup(self, env):
+    def bellman_backup(self, env, transition_cache=None, return_outcomes=False):
         """Update V(s) using the current estimated action values."""
         state = self.get_state(env)
 
         if self.is_goal(env):
             self.value_function[state] = 0.0
+            self.solved.add(state)
+            if return_outcomes:
+                return None, float("inf"), []
             return None
 
         self.initialize_value(env)
 
-        best_action, best_q = self.greedy_action(env)
+        best_action, best_q, best_outcomes = self.best_action_evaluation(
+            env,
+            transition_cache=transition_cache,
+        )
 
         if math.isfinite(best_q):
             self.value_function[state] = best_q
 
+        if return_outcomes:
+            return best_action, best_q, best_outcomes
         return best_action
+
+    def check_solved(self, env, transition_cache=None):
+        """Run a bounded, one-step sampled LRTDP solved check.
+
+        Exact LRTDP recursively checks the complete greedy envelope.  That
+        can explode for this environment because every obstacle configuration
+        is a distinct state.  This practical variant only labels a state when
+        its sampled residual is small and every sampled greedy successor is
+        already solved or is the goal.  Trials propagate these labels backward
+        without exploring an unbounded extra graph.
+        """
+        state = self.get_state(env)
+
+        if self.is_goal(env):
+            self.value_function[state] = 0.0
+            self.solved.add(state)
+            return True
+
+        if state in self.solved:
+            return True
+
+        if transition_cache is None:
+            transition_cache = {}
+
+        old_value = self.initialize_value(env)
+        action, best_q, outcomes = self.best_action_evaluation(
+            env,
+            transition_cache=transition_cache,
+        )
+
+        if action is None or not math.isfinite(best_q):
+            return False
+
+        self.value_function[state] = best_q
+        if abs(old_value - best_q) > self.epsilon:
+            return False
+
+        successors_solved = True
+        for next_env, result in outcomes:
+            if result["collision"]:
+                successors_solved = False
+                break
+            if result["reached_goal"]:
+                continue
+            if self.get_state(next_env) not in self.solved:
+                successors_solved = False
+                break
+
+        if successors_solved:
+            self.solved.add(state)
+            return True
+        return False
 
     def trial(self, initial_env):
         """
@@ -284,41 +379,81 @@ class RTDP(Planner):
         without moving the actor.
         """
         env = initial_env.clone(include_density=False)
+        visited = []
+        completed = False
 
         for _ in range(self.max_trial_steps):
             if self.is_goal(env):
-                return True
+                self.solved.add(self.get_state(env))
+                completed = True
+                break
 
-            action = self.bellman_backup(env)
+            state = self.get_state(env)
+            if state in self.solved:
+                completed = True
+                break
+
+            # sample_transition clones env and never mutates it, so retaining
+            # this snapshot directly avoids one extra clone per trial step.
+            visited.append(env)
+
+            action, _, outcomes = self.bellman_backup(
+                env,
+                return_outcomes=True,
+            )
 
             if action is None:
                 # No sampled-safe movement action exists.
                 # Do not deliberately move into a known obstacle.
-                return False
+                break
 
-            next_env, result = self.sample_transition(env, action)
+            # The sampled outcomes already contain independent transitions
+            # for this action.  Reuse one instead of cloning and stepping a
+            # second time for the trial, which is a major RTDP cost.
+            next_env, result = outcomes[
+                self.simulation_rng.integers(len(outcomes))
+            ]
 
             if result["collision"]:
-                return False
+                break
 
             env = next_env
 
             if result["reached_goal"]:
                 self.value_function[self.get_state(env)] = 0.0
-                return True
+                self.solved.add(self.get_state(env))
+                completed = True
+                break
 
-        return False
+        # Check the greedy envelope from the end of the trial backward.  This
+        # is the practical sampled analogue of LRTDP's CHECK_SOLVED pass.
+        transition_cache = {}
+        for visited_env in reversed(visited):
+            if not self.check_solved(
+                visited_env,
+                transition_cache=transition_cache,
+            ):
+                break
 
-    def RTDP(self, initial_env):
+        return completed
+
+    def LRTDP(self, initial_env):
         """
         Run repeated trials and return the greedy action at the
         initial state, based on the learned value function.
         """
         for _ in range(self.max_trials):
+            if self.get_state(initial_env) in self.solved:
+                break
             self.trial(initial_env)
+            if self.get_state(initial_env) in self.solved:
+                break
 
         best_action, _ = self.greedy_action(initial_env)
         return best_action
+
+    # Preserve the old method name for callers using the original RTDP class.
+    RTDP = LRTDP
 
     def step(self):
         """
@@ -338,7 +473,7 @@ class RTDP(Planner):
         start_pos = self.grid.actor_pos
 
         t0 = time.perf_counter()
-        action = self.RTDP(self.grid)
+        action = self.LRTDP(self.grid)
         self.time_planning += time.perf_counter() - t0
 
         if action is None:
@@ -384,6 +519,9 @@ class RTDP(Planner):
         return result
 
 
+RTDP = LRTDP
+
+
 if __name__ == "__main__":
     from grid import dynamic_sparse_grid, dynamic_wall_maze_grid, dynamic_dense_grid
 
@@ -401,14 +539,14 @@ if __name__ == "__main__":
     # seed=0,
     # start_clearance=5)
 
-    grid = dynamic_dense_grid()
+    grid = dynamic_sparse_grid(width=50, height=50)
 
-    planner = RTDP(
+    planner = LRTDP(
         grid,
         # max_trials=20,
         # max_trial_steps=100,
-        max_trials=20,
-        max_trial_steps=50,
+        max_trials=10,
+        max_trial_steps=25,
         transition_samples=3,
     )
 
