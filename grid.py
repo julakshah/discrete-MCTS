@@ -198,16 +198,23 @@ def dynamic_sparse_grid(
 def dynamic_dense_grid(
     width=100, height=100, start=(0, 0), goal=None, seed=42, start_clearance=5
 ):
-    """Scenario 2: about 25% coverage, with the same motion as scenario 1."""
+    """Dense world with many smaller, moving obstacles.
+
+    Compared with ``dynamic_sparse_grid``, this uses more occupied area and
+    breaks it into smaller obstacles so the environment has many independent
+    moving objects rather than a few large blocks.
+    """
     return generate_grid(
         width=width,
         height=height,
         start=start,
         goal=goal,
         seed=seed,
-        density=0.15,
+        density=0.2,
+        obstacle_size=(1, 4),
         static_fraction=0.0,
         stay_prob=0.2,
+        clearance=1,
         track_density=True,
         start_clearance=start_clearance,
     )
@@ -258,6 +265,166 @@ def dynamic_wall_maze_grid(
     east = (0.02, 0.03, 0.65, 0.03, 0.02, 0, 0.05, 0)
     corridor_edges = (-1, *wall_rows, height)
     for corridor in range(4):
+        first_row = corridor_edges[corridor] + 1
+        last_row = corridor_edges[corridor + 1] - obstacle_size
+        space = last_row - first_row
+        lane_rows = (first_row + space // 4, first_row + 3 * space // 4)
+
+        for lane, y in enumerate(lane_rows):
+            movement_probs = west if (corridor + lane) % 2 == 0 else east
+            offset = 2 + lane * (spacing // 2)
+            for x in range(offset, width - obstacle_size + 1, spacing):
+                obstacle = Obstacle(
+                    x,
+                    y,
+                    obstacle_size,
+                    obstacle_size,
+                    movement_probs=movement_probs,
+                    stay_prob=0.2,
+                )
+                if near_start(obstacle):
+                    continue
+                if (
+                    x <= goal[0] < x + obstacle_size
+                    and y <= goal[1] < y + obstacle_size
+                ):
+                    continue
+                obstacles.append(obstacle)
+
+    return Grid(
+        width,
+        height,
+        obstacles=obstacles,
+        start=start,
+        goal=goal,
+        seed=seed,
+        track_density=True,
+    )
+
+
+def dynamic_wall_maze_two_section_grid(
+    width=100, height=100, start=(0, 0), goal=None, seed=42, start_clearance=5
+):
+    """Two-section version of the dynamic wall maze.
+
+    The two alternating wall sections create a single backwards-C-style
+    zig-zag: the first crossing is on the right and the second is on the
+    left. The pedestrian obstacles and their movement model match
+    ``dynamic_wall_maze_grid``.
+    """
+    if width < 30 or height < 30:
+        raise ValueError("The wall maze needs a grid at least 30 by 30")
+    if not isinstance(start_clearance, int) or start_clearance < 0:
+        raise ValueError("start_clearance must be a nonnegative integer")
+
+    if goal is None:
+        goal = (0, height - 1)
+
+    gap_width = max(4, width // 5)
+    wall_rows = (height // 3, 2 * height // 3)
+    obstacles = [
+        Obstacle(0, wall_rows[0], width - gap_width, 1, stay_prob=1),
+        Obstacle(gap_width, wall_rows[1], width - gap_width, 1, stay_prob=1),
+    ]
+
+    def near_start(obstacle):
+        x, y = start
+        return (
+            obstacle.x <= x + start_clearance
+            and obstacle.x + obstacle.width > x - start_clearance
+            and obstacle.y <= y + start_clearance
+            and obstacle.y + obstacle.height > y - start_clearance
+        )
+
+    if any(near_start(wall) for wall in obstacles):
+        raise ValueError("Start or its clearance overlaps a maze wall")
+
+    obstacle_size = max(2, min(4, width // 25, height // 15))
+    spacing = max(obstacle_size + 2, width // 6)
+    west = (0.02, 0, 0.05, 0, 0.02, 0.03, 0.65, 0.03)
+    east = (0.02, 0.03, 0.65, 0.03, 0.02, 0, 0.05, 0)
+    corridor_edges = (-1, *wall_rows, height)
+
+    for corridor in range(3):
+        first_row = corridor_edges[corridor] + 1
+        last_row = corridor_edges[corridor + 1] - obstacle_size
+        space = last_row - first_row
+        lane_rows = (first_row + space // 4, first_row + 3 * space // 4)
+
+        for lane, y in enumerate(lane_rows):
+            movement_probs = west if (corridor + lane) % 2 == 0 else east
+            offset = 2 + lane * (spacing // 2)
+            for x in range(offset, width - obstacle_size + 1, spacing):
+                obstacle = Obstacle(
+                    x,
+                    y,
+                    obstacle_size,
+                    obstacle_size,
+                    movement_probs=movement_probs,
+                    stay_prob=0.2,
+                )
+                if near_start(obstacle):
+                    continue
+                if (
+                    x <= goal[0] < x + obstacle_size
+                    and y <= goal[1] < y + obstacle_size
+                ):
+                    continue
+                obstacles.append(obstacle)
+
+    return Grid(
+        width,
+        height,
+        obstacles=obstacles,
+        start=start,
+        goal=goal,
+        seed=seed,
+        track_density=True,
+    )
+
+
+def dynamic_wall_maze_one_section_grid(
+    width=50, height=50, start=(0, 0), goal=(0,45), seed=1, start_clearance=5
+):
+    """One-wall dynamic maze with start and goal on the same row.
+
+    The wall spans from the left edge and leaves a gap on the right. With the
+    default start and goal, the actor must travel down through the gap and
+    back up to reach the goal on the starting row.
+    """
+    if width < 30 or height < 30:
+        raise ValueError("The wall maze needs a grid at least 30 by 30")
+    if not isinstance(start_clearance, int) or start_clearance < 0:
+        raise ValueError("start_clearance must be a nonnegative integer")
+
+    # if goal is None:
+    #     goal = (width - 1, start[1])
+    # elif goal[1] != start[1]:
+    #     raise ValueError("The one-section maze requires start and goal on the same y")
+
+    gap_width = max(4, width // 5)
+    wall_row = height // 2
+    obstacles = [Obstacle(0, wall_row, width - gap_width, 1, stay_prob=1)]
+
+    def near_start(obstacle):
+        x, y = start
+        return (
+            obstacle.x <= x + start_clearance
+            and obstacle.x + obstacle.width > x - start_clearance
+            and obstacle.y <= y + start_clearance
+            and obstacle.y + obstacle.height > y - start_clearance
+        )
+
+    if near_start(obstacles[0]):
+        raise ValueError("Start or its clearance overlaps the maze wall")
+
+    obstacle_size = max(2, min(4, width // 25, height // 15))
+    spacing = max(obstacle_size + 2, width // 6)
+    west = (0.02, 0, 0.05, 0, 0.02, 0.03, 0.65, 0.03)
+    east = (0.02, 0.03, 0.65, 0.03, 0.02, 0, 0.05, 0)
+    corridor_edges = (-1, wall_row, height)
+
+    for corridor in range(2):
         first_row = corridor_edges[corridor] + 1
         last_row = corridor_edges[corridor + 1] - obstacle_size
         space = last_row - first_row

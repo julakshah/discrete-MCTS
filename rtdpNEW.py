@@ -523,16 +523,16 @@ RTDP = LRTDP
 
 
 if __name__ == "__main__":
-    from grid import dynamic_sparse_grid, dynamic_wall_maze_grid, dynamic_dense_grid
+    from grid import dynamic_sparse_grid, dynamic_wall_maze_grid, dynamic_dense_grid, dynamic_wall_maze_one_section_grid
 
-    # grid = dynamic_sparse_grid(
-    #     width=50,
-    #     height=50,
-    #     start=(0,0),
-    #     goal=(20,20),
-    #     seed=0,
-    #     start_clearance=2,
-    # )
+    grid = dynamic_sparse_grid(
+        width=50,
+        height=50,
+        start=(0,0),
+        goal=(20,20),
+        seed=0,
+        start_clearance=2,
+    )
     # grid = dynamic_wall_maze_grid(
     # width=30,
     # height=30,
@@ -546,7 +546,7 @@ if __name__ == "__main__":
         # max_trials=20,
         # max_trial_steps=100,
         max_trials=10,
-        max_trial_steps=25,
+        max_trial_steps=20,
         transition_samples=3,
     )
 

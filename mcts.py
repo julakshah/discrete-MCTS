@@ -53,6 +53,8 @@ class ObstacleState:
     pos: tuple[int, int]
     height: int
     width: int
+    movement_probs: tuple[float, ...]
+    stay_prob: float
 
 @dataclass(frozen=True)
 class State:
@@ -99,24 +101,20 @@ class ChanceNode:
     num_finish: int = 0
 
 def get_state(grid):
-    # Count all obstacle positions 
+    # Preserve obstacle order. Grid.step() samples and moves obstacles by
+    # list index, and different obstacles can have different policies.
+    # Sorting by position aliases states with different transition dynamics.
     obs_tuple = tuple(ObstacleState(
         pos=(obs.x,obs.y),
         width=obs.width,
-        height=obs.height
+        height=obs.height,
+        movement_probs=tuple(float(prob) for prob in obs.movement_probs),
+        stay_prob=float(obs.stay_prob),
     ) for obs in grid.obstacles)
-
-    # Sort obstacles by center position (ensures order of obstacles doesn't matter)
-    obstacles = tuple(sorted(obs_tuple, key=lambda o: (
-        o.pos[0],
-        o.pos[1],
-        o.width,
-        o.height,
-    )))
 
     return State(
         actor_pos=(grid.actor_pos[0],grid.actor_pos[1]),
-        obstacles=obstacles
+        obstacles=obs_tuple,
     )
 
 def ucb(parent, child, c):
@@ -143,16 +141,21 @@ RolloutPolicy = Literal['random', 'greedy', 'epsilon_greedy', 'safe_random']
 RewardHeuristic = Literal['absorbing_failure', 'cost_to_go', 'progress',"legacy_progress"]
 
 
-def choose_rollout_action(env, goal, policy='epsilon_greedy', epsilon=0.2):
+def legal_actions(env):
+    """Return movement actions that are legal in the current Grid state."""
+    x, y = env.actor_pos
+    return [
+        action
+        for action, (dx, dy) in enumerate(DIRECTIONS)
+        if env.can_move((x, y), (x + int(dx), y + int(dy)))
+    ]
+
+
+def choose_rollout_action(env, goal, policy='safe_random', epsilon=0.2):
     if policy == 'random':
         return random.randrange(8)
     if policy == 'safe_random':
-        x, y = env.actor_pos
-        # Use can_move to respect diagonal corner collisions.
-        candidates = [
-            a for a, (dx, dy) in enumerate(DIRECTIONS)
-            if env.can_move((x, y), (x + int(dx), y + int(dy)))
-        ]
+        candidates = legal_actions(env)
         return random.choice(candidates) if candidates else None
     if policy not in ('greedy', 'epsilon_greedy'):
         raise ValueError(f'Unknown rollout policy: {policy}')
@@ -188,6 +191,12 @@ def evaluate_rollout(start_pos, final_pos, goal, path_cost, *,
 
         if collision:
             return -1.0 - 0.001 * path_cost
+
+        # Match the original rollout behavior: a dead end receives only the
+        # small accumulated path-cost penalty, rather than being credited for
+        # geometric progress made before getting stuck.
+        if no_path:
+            return -0.001 * path_cost
 
         initial_distance = math.dist(start_pos, goal)
         final_distance = math.dist(final_pos, goal)
@@ -269,7 +278,11 @@ def _mcts(env, *, open_loop, c, max_iters, rollout_horizon,
         path_cost_weight=path_cost_weight,
     )
     if open_loop:
-        root = OpenLoopNode(state=env.actor_pos, children={}, untried_actions=list(range(8)))
+        root = OpenLoopNode(
+            state=env.actor_pos,
+            children={},
+            untried_actions=legal_actions(env),
+        )
     else:
         root = StateNode(state=get_state(env))
 
@@ -283,45 +296,82 @@ def _mcts(env, *, open_loop, c, max_iters, rollout_horizon,
         result = {}
 
         while depth < rollout_horizon:
+            available_actions = legal_actions(sim)
+            if not available_actions:
+                result = {'no_path': True}
+                break
+
             if open_loop:
-                untried = current.untried_actions
+                untried = [
+                    action
+                    for action in current.untried_actions
+                    if action in available_actions
+                ]
                 if untried:
                     action = random.choice(untried)
-                    untried.remove(action)
-                    child = OpenLoopNode(state=None, parent=current, children={},
-                                         action=action, untried_actions=list(range(8)))
+                    current.untried_actions.remove(action)
+                    child = OpenLoopNode(
+                        state=None,
+                        parent=current,
+                        children={},
+                        action=action,
+                        untried_actions=[],
+                    )
                     current.children[action] = child
                     expanding = True
                 else:
-                    child = max(current.children.values(), key=lambda n: ucb(current, n, c))
+                    candidates = [
+                        child
+                        for action, child in current.children.items()
+                        if action in available_actions
+                    ]
+                    if not candidates:
+                        result = {'no_path': True}
+                        break
+                    child = max(candidates, key=lambda n: ucb(current, n, c))
                     action = child.action
                     expanding = False
                 before = sim.actor_pos
                 result = sim.step(actor_action=int(action))
                 depth += 1
 
-                # Still applies cost even if it tries to run into the wall
-                # This ends up discouraging stationary behavior
+                if open_loop and expanding:
+                    child.untried_actions = legal_actions(sim)
+
+                # The action was geometrically legal when selected. A moving
+                # obstacle can still cause a collision during this tick.
                 path_cost += ACTION_COSTS[action]
 
                 path.append(child)
                 current = child
             else:
-                untried = [a for a in range(8) if a not in current.children]
+                untried = [
+                    action
+                    for action in available_actions
+                    if action not in current.children
+                ]
                 if untried:
                     action = random.choice(untried)
                     chance = ChanceNode(action=action, parent=current)
                     current.children[action] = chance
                 else:
-                    chance = max(current.children.values(), key=lambda n: ucb(current, n, c))
+                    candidates = [
+                        chance
+                        for action, chance in current.children.items()
+                        if action in available_actions
+                    ]
+                    if not candidates:
+                        result = {'no_path': True}
+                        break
+                    chance = max(candidates, key=lambda n: ucb(current, n, c))
                     action = chance.action
                 path.append(chance)
                 before = sim.actor_pos
                 result = sim.step(actor_action=int(action))
                 depth += 1
 
-                # Still applies cost even if it tries to run into the wall
-                # This ends up discouraging stationary behavior
+                # The action was geometrically legal when selected. A moving
+                # obstacle can still cause a collision during this tick.
                 path_cost += ACTION_COSTS[action]
 
                 state = get_state(sim)
@@ -368,8 +418,8 @@ def _mcts(env, *, open_loop, c, max_iters, rollout_horizon,
 
 
 def mcts_closed_loop(start, goal, env, c=1.0, max_iters=1000,
-                     rollout_horizon=50, *, rollout_policy='epsilon_greedy',
-                     epsilon=0.2, reward_heuristic='absorbing_failure',
+                     rollout_horizon=50, *, rollout_policy='safe_random',
+                     epsilon=0.2, reward_heuristic='legacy_progress',
                      collision_penalty=20.0, failure_cost_per_step=1.0,
                      progress_weight=0.5, path_cost_weight=1.0, verbose=False):
     return _mcts(env, open_loop=False, c=c, max_iters=max_iters,
@@ -382,8 +432,8 @@ def mcts_closed_loop(start, goal, env, c=1.0, max_iters=1000,
 
 
 def mcts_open_loop(start, goal, env, c=1.0, max_iters=1000,
-                   rollout_horizon=50, *, rollout_policy='epsilon_greedy',
-                   epsilon=0.2, reward_heuristic='absorbing_failure',
+                   rollout_horizon=50, *, rollout_policy='safe_random',
+                   epsilon=0.2, reward_heuristic='legacy_progress',
                    collision_penalty=20.0, failure_cost_per_step=1.0,
                    progress_weight=0.5, path_cost_weight=1.0, verbose=False):
     return _mcts(env, open_loop=True, c=c, max_iters=max_iters,

@@ -58,9 +58,9 @@ class MCTSPlanner(Planner):
         if self.profile:
             with cProfile.Profile() as profiler:
                 action = mcts_fn(
-                    grid.actor_pos,
-                    grid.goal,
-                    grid,
+                    self.grid.actor_pos,
+                    self.grid.goal,
+                    self.grid,
                     c=self.c,
                     max_iters=self.max_iters,
                     rollout_horizon=self.rollout_horizon,
@@ -72,13 +72,13 @@ class MCTSPlanner(Planner):
                     reward_heuristic=self.heuristic,
                     collision_penalty=20.0,
                     failure_cost_per_step=20.0,
-                    verbose=True,
+                    verbose=self.verbose,
                 )
         else:
             action = mcts_fn(
-                grid.actor_pos,
-                grid.goal,
-                grid,
+                self.grid.actor_pos,
+                self.grid.goal,
+                self.grid,
                 c=self.c,
                 max_iters=self.max_iters,
                 rollout_horizon=self.rollout_horizon,
@@ -90,11 +90,12 @@ class MCTSPlanner(Planner):
                 reward_heuristic=self.heuristic,
                 collision_penalty=20.0,
                 failure_cost_per_step=20.0,
-                verbose=True,
+                verbose=self.verbose,
             )
 
         self.time_planning += time.perf_counter() - t0
-        print(f"Action: {action}")
+        if self.verbose:
+            print(f"Action: {action}")
 
         if self.profile:
             stats = pstats.Stats(profiler)
