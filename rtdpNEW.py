@@ -24,6 +24,11 @@ DIRECTIONS = (
     (-1, -1),
 )
 
+WAIT_ACTION = len(DIRECTIONS)
+# Waiting consumes one simulation tick, so it must not be a zero-cost
+# self-loop in the Bellman backup.
+WAIT_COST = 1.0
+
 COSTS = {
     (0, -1): 1,
     (1, -1): math.sqrt(2),
@@ -62,7 +67,7 @@ class RTDP(Planner):
         self,
         grid,
         max_trials=100,
-        max_trial_steps=200,
+        max_trial_steps=20,
         transition_samples=10,
         verbose=True,
     ):
@@ -157,8 +162,9 @@ class RTDP(Planner):
         """
         Return actions valid now and safe against any possible next obstacle move.
 
-        Actions are indices 0 through 7, matching Grid.DIRECTIONS.
-        Waiting is not included, matching the MCTS tree's action set.
+        Movement actions are indices 0 through 7.  WAIT_ACTION represents
+        Grid.step(actor_action=None): the actor stays put while obstacles
+        advance one tick.
         """
         actions = []
 
@@ -179,7 +185,23 @@ class RTDP(Planner):
 
             actions.append(action)
 
+        # Waiting is a real Grid transition, not a planner-side no-op.  It is
+        # safe only when no possible obstacle move can enter the actor's cell.
+        if self.safe_from_next_obstacle_moves(env, env.actor_pos):
+            actions.append(WAIT_ACTION)
+
         return actions
+
+    def apply_action(self, env, action):
+        """Apply an RTDP action using Grid's movement/wait convention."""
+        if action == WAIT_ACTION:
+            return env.step()
+        return env.step(actor_action=action)
+
+    def action_cost(self, action):
+        if action == WAIT_ACTION:
+            return WAIT_COST
+        return COSTS[DIRECTIONS[action]]
 
     def sample_transition(self, env, action):
         """
@@ -189,7 +211,7 @@ class RTDP(Planner):
         simulated_env = env.clone(include_density=False)
         simulated_env.rng = self.simulation_rng
         self.nodes_visited += 1
-        result = simulated_env.step(actor_action=action)
+        result = self.apply_action(simulated_env, action)
 
         return simulated_env, result
 
@@ -212,7 +234,7 @@ class RTDP(Planner):
             if result["collision"]:
                 return float("inf")
 
-            immediate_cost = COSTS[DIRECTIONS[action]]
+            immediate_cost = self.action_cost(action)
 
             if result["reached_goal"]:
                 total_cost += immediate_cost
@@ -257,8 +279,9 @@ class RTDP(Planner):
         """
         Start a trial from the current environment configuration.
 
-        Each step chooses a greedy action, performs a Bellman backup,
-        and samples the resulting transition.
+        Each step chooses a greedy action, performs a Bellman backup, and
+        samples the resulting transition.  WAIT_ACTION advances obstacles
+        without moving the actor.
         """
         env = initial_env.clone(include_density=False)
 
@@ -328,16 +351,19 @@ class RTDP(Planner):
                 "actor_pos": self.grid.actor_pos,
             }
         else:
-            result = self.grid.step(actor_action=action)
+            result = self.apply_action(self.grid, action)
 
             if self.grid.actor_pos != start_pos:
-                self.dist_traveled += COSTS[DIRECTIONS[action]]
+                self.dist_traveled += self.action_cost(action)
 
             if self.verbose:
-                print(
-                    f"RTDP selected action {action}: "
-                    f"{DIRECTIONS[action]}"
-                )
+                if action == WAIT_ACTION:
+                    print("RTDP selected wait action")
+                else:
+                    print(
+                        f"RTDP selected action {action}: "
+                        f"{DIRECTIONS[action]}"
+                    )
 
         self.history.append(self.grid.actor_pos)
         self.frames.append((
@@ -359,20 +385,31 @@ class RTDP(Planner):
 
 
 if __name__ == "__main__":
-    from grid import dynamic_sparse_grid
+    from grid import dynamic_sparse_grid, dynamic_wall_maze_grid, dynamic_dense_grid
 
-    grid = dynamic_sparse_grid(
-        width=10,
-        height=10,
-        seed=0,
-        start_clearance=2,
-    )
+    # grid = dynamic_sparse_grid(
+    #     width=50,
+    #     height=50,
+    #     start=(0,0),
+    #     goal=(20,20),
+    #     seed=0,
+    #     start_clearance=2,
+    # )
+    # grid = dynamic_wall_maze_grid(
+    # width=30,
+    # height=30,
+    # seed=0,
+    # start_clearance=5)
+
+    grid = dynamic_dense_grid()
 
     planner = RTDP(
         grid,
-        max_trials=100,
-        max_trial_steps=100,
-        transition_samples=10,
+        # max_trials=20,
+        # max_trial_steps=100,
+        max_trials=20,
+        max_trial_steps=50,
+        transition_samples=3,
     )
 
     planner.init_plot()
