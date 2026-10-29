@@ -9,7 +9,7 @@ from astar import COSTS, astar, dynamic_astar, heuristic
 
 
 class Planner(ABC):
-    def __init__(self, grid):
+    def __init__(self, grid, use_gui=True):
         """Set up the grid, history, and totals shared by planners."""
         self.grid = grid
         self.history = [grid.actor_pos]

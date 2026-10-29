@@ -16,13 +16,14 @@ class MCTSPlanner(Planner):
         open_loop=False,
         max_iters=1000,
         rollout_horizon=50,
-        timeout=1.0,
+        timeout=None,
         c=0.1,
         profile=False,
         verbose=True,
         policy="safe_random",
         heuristic="legacy_progress",
-        eps=0.2
+        eps=0.2,
+        plot=True,
     ):
         super().__init__(grid)
 
@@ -38,6 +39,8 @@ class MCTSPlanner(Planner):
         self.policy = policy
         self.heuristic = heuristic
         self.eps = eps
+        self.plot = True
+        self.timeout = timeout
 
         self.result = None
 
@@ -72,7 +75,8 @@ class MCTSPlanner(Planner):
                     reward_heuristic=self.heuristic,
                     collision_penalty=20.0,
                     failure_cost_per_step=20.0,
-                    verbose=self.verbose,
+                    verbose=True,
+                    timeout=self.timeout
                 )
         else:
             action = mcts_fn(
@@ -90,7 +94,8 @@ class MCTSPlanner(Planner):
                 reward_heuristic=self.heuristic,
                 collision_penalty=20.0,
                 failure_cost_per_step=20.0,
-                verbose=self.verbose,
+                verbose=True,
+                timeout=self.timeout
             )
 
         self.time_planning += time.perf_counter() - t0
@@ -133,8 +138,8 @@ class MCTSPlanner(Planner):
             self.grid.obstacle_matrix(),
             current_pos,
         ))
-
-        self.update_plot()
+        if self.plot:
+            self.update_plot()
         result = self.add_metrics(result)
 
         if self.verbose:

@@ -5,6 +5,7 @@ import random
 from dataclasses import dataclass, field
 import numpy as np
 import math
+import time
 
 DIRECTIONS = np.array([
     (0, -1),   # N
@@ -101,10 +102,8 @@ class ChanceNode:
     num_finish: int = 0
 
 def get_state(grid):
-    # Preserve obstacle order. Grid.step() samples and moves obstacles by
-    # list index, and different obstacles can have different policies.
-    # Sorting by position aliases states with different transition dynamics.
-    obs_tuple = tuple(ObstacleState(
+    # Count all obstacle positions 
+    obstacles = tuple(ObstacleState(
         pos=(obs.x,obs.y),
         width=obs.width,
         height=obs.height,
@@ -114,7 +113,7 @@ def get_state(grid):
 
     return State(
         actor_pos=(grid.actor_pos[0],grid.actor_pos[1]),
-        obstacles=obs_tuple,
+        obstacles=obstacles,
     )
 
 def ucb(parent, child, c):
@@ -171,7 +170,7 @@ def evaluate_rollout(start_pos, final_pos, goal, path_cost, *,
                      reached_goal=False, collision=False, no_path=False,
                      depth=0, horizon=50, reward_heuristic='absorbing_failure',
                      collision_penalty=20.0, failure_cost_per_step=1.0,
-                     progress_weight=0.5, path_cost_weight=1.0):
+                     progress_weight=0.5, path_cost_weight=0.1):
     """Evaluate a complete root-to-terminal/leaf simulation exactly once.
 
     depth counts executed grid.step calls from the root, including a terminal
@@ -213,7 +212,7 @@ def evaluate_rollout(start_pos, final_pos, goal, path_cost, *,
     if reward_heuristic == 'progress':
         initial = math.dist(start_pos, goal)
         final = math.dist(final_pos, goal)
-        progress = progress_weight * (initial - final) / max(initial, 1.0)
+        progress = progress_weight * (initial - final)# / max(initial, 1.0)
         if reached_goal:
             return 1.0 - travel
         if collision:
@@ -226,7 +225,7 @@ def rollout(env, goal, path_cost, *, horizon, depth, rollout_policy,
             epsilon, start_pos):
     """Simulate only the steps remaining in the root-relative horizon."""
     result = None
-    for _ in range(max(0, horizon - depth)):
+    for _ in range(max(0, horizon - depth)): # Avoids infiinte loop i case of zero remaining horizon
         action = choose_rollout_action(env, goal, rollout_policy, epsilon)
         if action is None:
             result = {'no_path': True}
@@ -255,7 +254,7 @@ def _terminal_reward(env, start_pos, goal, path_cost, depth, horizon,
 def _mcts(env, *, open_loop, c, max_iters, rollout_horizon,
           rollout_policy, epsilon, reward_heuristic, collision_penalty,
           failure_cost_per_step, progress_weight, path_cost_weight,
-          verbose):
+          verbose, timeout=None):
     if max_iters < 1 or rollout_horizon < 1:
         raise ValueError('max_iters and rollout_horizon must be positive')
     if rollout_policy not in ('random', 'greedy', 'epsilon_greedy', 'safe_random'):
@@ -285,9 +284,14 @@ def _mcts(env, *, open_loop, c, max_iters, rollout_horizon,
         )
     else:
         root = StateNode(state=get_state(env))
+    
+    # Used for comparing performance under same time budget (i.e. open vs closed loop)
+    deadline = time.perf_counter() + timeout if timeout is not None else None
 
-    for _ in range(max_iters):
-        sim = env.clone()
+    for it in range(max_iters):
+        if deadline is not None and it > 0 and time.perf_counter() >= deadline:
+            break
+        sim = env.clone() # Start each iteration with new copy of environment
         start_pos = sim.actor_pos
         current = root
         path = [root]
@@ -308,6 +312,7 @@ def _mcts(env, *, open_loop, c, max_iters, rollout_horizon,
                     if action in available_actions
                 ]
                 if untried:
+                    # Untried actions always have inf value from UCB, so choose those first
                     action = random.choice(untried)
                     current.untried_actions.remove(action)
                     child = OpenLoopNode(
@@ -320,19 +325,13 @@ def _mcts(env, *, open_loop, c, max_iters, rollout_horizon,
                     current.children[action] = child
                     expanding = True
                 else:
-                    candidates = [
-                        child
-                        for action, child in current.children.items()
-                        if action in available_actions
-                    ]
-                    if not candidates:
-                        result = {'no_path': True}
-                        break
-                    child = max(candidates, key=lambda n: ucb(current, n, c))
+                    # UCB reward function --- choose most promising child in selection step
+                    child = max(current.children.values(), key=lambda n: ucb(current, n, c))
                     action = child.action
                     expanding = False
+
                 before = sim.actor_pos
-                result = sim.step(actor_action=int(action))
+                result = sim.step(actor_action=int(action)) # result contains information about state (e.g. goal, obstacle)
                 depth += 1
 
                 if open_loop and expanding:
@@ -351,19 +350,16 @@ def _mcts(env, *, open_loop, c, max_iters, rollout_horizon,
                     if action not in current.children
                 ]
                 if untried:
+                    # Untried actions always have inf value from UCB, so choose those first
                     action = random.choice(untried)
+
+                    # In closed loop, every state node leads to a chance node
+                    # Chance nodes model the random effect the environment has on the state
                     chance = ChanceNode(action=action, parent=current)
                     current.children[action] = chance
                 else:
-                    candidates = [
-                        chance
-                        for action, chance in current.children.items()
-                        if action in available_actions
-                    ]
-                    if not candidates:
-                        result = {'no_path': True}
-                        break
-                    chance = max(candidates, key=lambda n: ucb(current, n, c))
+                    # UCB selection
+                    chance = max(current.children.values(), key=lambda n: ucb(current, n, c))
                     action = chance.action
                 path.append(chance)
                 before = sim.actor_pos
@@ -374,8 +370,8 @@ def _mcts(env, *, open_loop, c, max_iters, rollout_horizon,
                 # obstacle can still cause a collision during this tick.
                 path_cost += ACTION_COSTS[action]
 
-                state = get_state(sim)
-                expanding = state not in chance.children
+                state = get_state(sim) # Reading the state informs us where the chance node leads
+                expanding = state not in chance.children # If state is new, add the state node 
                 if expanding:
                     chance.children[state] = StateNode(state=state, parent=chance)
                 current = chance.children[state]
@@ -386,6 +382,7 @@ def _mcts(env, *, open_loop, c, max_iters, rollout_horizon,
             if expanding:
                 break
 
+        # If we're still free, do a rollout from current node 
         if not (result.get('collision') or result.get('reached_goal') or result.get('no_path')):
             path_cost, depth, result = rollout(
                 sim, sim.goal, path_cost, horizon=rollout_horizon,
@@ -393,10 +390,13 @@ def _mcts(env, *, open_loop, c, max_iters, rollout_horizon,
                 epsilon=epsilon, start_pos=start_pos,
             )
 
+        # Compute heuristic function value 
         reward = _terminal_reward(sim, start_pos, sim.goal, path_cost,
                                   depth, rollout_horizon, result, reward_kwargs)
         collided = int(result.get('collision', False))
         finished = int(result.get('reached_goal', False))
+
+        # Backprop step --- walk up tree, increment rewards
         for node in reversed(path):
             node.visits += 1
             node.total_reward += reward
@@ -406,6 +406,8 @@ def _mcts(env, *, open_loop, c, max_iters, rollout_horizon,
 
     if not root.children:
         return None
+
+    # Best choice is the most explored one (most common choice in literature)
     best = max(root.children.values(), key=lambda n: n.visits)
     if verbose:
         for action, child in sorted(root.children.items()):
@@ -421,25 +423,25 @@ def mcts_closed_loop(start, goal, env, c=1.0, max_iters=1000,
                      rollout_horizon=50, *, rollout_policy='safe_random',
                      epsilon=0.2, reward_heuristic='legacy_progress',
                      collision_penalty=20.0, failure_cost_per_step=1.0,
-                     progress_weight=0.5, path_cost_weight=1.0, verbose=False):
+                     progress_weight=0.5, path_cost_weight=0.1, verbose=False, timeout=None):
     return _mcts(env, open_loop=False, c=c, max_iters=max_iters,
                  rollout_horizon=rollout_horizon, rollout_policy=rollout_policy,
                  epsilon=epsilon, reward_heuristic=reward_heuristic,
                  collision_penalty=collision_penalty,
                  failure_cost_per_step=failure_cost_per_step,
                  progress_weight=progress_weight,
-                 path_cost_weight=path_cost_weight, verbose=verbose)
+                 path_cost_weight=path_cost_weight, verbose=verbose, timeout=timeout)
 
 
 def mcts_open_loop(start, goal, env, c=1.0, max_iters=1000,
                    rollout_horizon=50, *, rollout_policy='safe_random',
                    epsilon=0.2, reward_heuristic='legacy_progress',
                    collision_penalty=20.0, failure_cost_per_step=1.0,
-                   progress_weight=0.5, path_cost_weight=1.0, verbose=False):
+                   progress_weight=0.5, path_cost_weight=0.1, verbose=False, timeout=None):
     return _mcts(env, open_loop=True, c=c, max_iters=max_iters,
                  rollout_horizon=rollout_horizon, rollout_policy=rollout_policy,
                  epsilon=epsilon, reward_heuristic=reward_heuristic,
                  collision_penalty=collision_penalty,
                  failure_cost_per_step=failure_cost_per_step,
                  progress_weight=progress_weight,
-                 path_cost_weight=path_cost_weight, verbose=verbose)
+                 path_cost_weight=path_cost_weight, verbose=verbose, timeout=timeout)
