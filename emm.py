@@ -214,7 +214,7 @@ if __name__ == "__main__":
         width=width, height=height, seed=seed, start_clearance=start_clearance
     )
     planner = Expectimax(
-        grid, depth=30, collision_penalty=100.0, replan_every=2, verbose=False
+        grid, depth=10, collision_penalty=100.0, replan_every=1, verbose=False
     )
 
     planner.init_plot()
